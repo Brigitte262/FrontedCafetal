@@ -9,7 +9,7 @@ import { ControlCalidad } from './app/produccion/calidad'
 import { GestionInventario } from './app/logistica/inventario'
 import { KardexMovimientos } from './app/logistica/kardex'
 import { GestionFacturas } from './app/finanzas/facturas'
-import { GestionEmpleados } from './app/rrhh/empleados'
+import  GestionEmpleados  from './app/rrhh/empleados'
 
 // Simple router state management
 type Route = 

@@ -1,632 +1,370 @@
-import * as React from 'react'
-import { ColumnDef } from '@tanstack/react-table'
-import { MoreHorizontal, Plus, User, Calendar, Phone, Mail } from 'lucide-react'
-import { Button } from '../../components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card'
-import { DataTable } from '../../components/data-table'
-import { StatusBadge } from '../../components/status-badge'
-import { Avatar, AvatarFallback } from '../../components/ui/avatar'
-import { 
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '../../components/ui/dropdown-menu'
-import { 
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from '../../components/ui/dialog'
-import { 
-  Form,
-  FormControl,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-} from '../../components/ui/form'
-import { Input } from '../../components/ui/input'
-import { 
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '../../components/ui/select'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '../../components/ui/tabs'
-import { 
-  BarChart, 
-  Bar, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
-  ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell
-} from 'recharts'
-import { useForm } from 'react-hook-form@7.55.0'
-import { mockEmployees, mockPositions } from '../../lib/mock-data'
-import { Employee, EmployeeStatus } from '../../lib/types'
-import { formatCurrency, formatDate } from '../../lib/utils'
-import { toast } from 'sonner@2.0.3'
+import * as React from "react";
+import type { ColumnDef } from "@tanstack/react-table";
+import jsPDF from "jspdf";
+import { DataTable } from "@/components/data-table";
+import { Users, CheckCircle2, XCircle, LayoutGrid } from "lucide-react";
 
-const COLORS = ['#8884d8', '#82ca9d', '#ffc658', '#ff7300', '#0088fe']
 
-interface FormData {
-  documentId: string
-  firstName: string
-  lastName: string
-  positionId: string
-  hireDate: string
-  baseSalary: number
-  email: string
-  phone: string
+import autoTable from "jspdf-autotable";
+
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { StatusBadge } from "@/components/status-badge";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { formatCurrency, formatDate } from "@/lib/utils";
+import { EmployeeStatus } from "@/lib/types";
+
+import { useEmployees } from "@/hooks/useCafetalApi";
+
+type Row = {
+  id: number;
+  doc_id: string;
+  nombres: string;
+  apellidos: string;
+  email: string | null;
+  telefono: string | null;
+  position_id: number | null;
+  base_salary: number | null;
+  fecha_ingreso: string;
+  estado: "activo" | "inactivo";
+};
+
+function initials(first?: string, last?: string) {
+  const a = (first?.[0] ?? "").toUpperCase();
+  const b = (last?.[0] ?? "").toUpperCase();
+  return (a + b) || "E";
 }
 
-export function GestionEmpleados() {
-  const [isCreateOpen, setIsCreateOpen] = React.useState(false)
-  const [employees, setEmployees] = React.useState<Employee[]>(mockEmployees)
-  const [departmentFilter, setDepartmentFilter] = React.useState('all')
-  const [statusFilter, setStatusFilter] = React.useState('all')
+export default function GestionEmpleados() {
+  // Filtros & paginación (server-side)
+  const [q, setQ] = React.useState("");
+  const [estado, setEstado] = React.useState<"todos" | "activo" | "inactivo">("todos");
+  const [page, setPage] = React.useState(1);
+  const pageSize = 10;
 
-  const form = useForm<FormData>({
-    defaultValues: {
-      documentId: '',
-      firstName: '',
-      lastName: '',
-      positionId: '',
-      hireDate: '',
-      baseSalary: 0,
-      email: '',
-      phone: ''
-    }
-  })
+  // columnas visibles (client-side)
+  const [visible, setVisible] = React.useState({
+    doc_id: true,
+    telefono: true,
+    position_id: true,
+    base_salary: true,
+    fecha_ingreso: true,
+    estado: true,
+  });
 
-  const handleCreateEmployee = (data: FormData) => {
-    const newEmployee: Employee = {
-      id: Date.now().toString(),
-      documentId: data.documentId,
-      firstName: data.firstName,
-      lastName: data.lastName,
-      positionId: data.positionId,
-      hireDate: data.hireDate,
-      status: EmployeeStatus.ACTIVE,
-      baseSalary: data.baseSalary,
-      email: data.email,
-      phone: data.phone
-    }
+  // fetch
+  const { data, loading, error, refetch } = useEmployees({
+    q,
+    page,
+    page_size: pageSize,
+    estado: estado === "todos" ? undefined : estado, // si tu API acepta ?estado=
+  });
 
-    setEmployees([...employees, newEmployee])
-    setIsCreateOpen(false)
-    form.reset()
-    toast.success('Empleado registrado exitosamente')
-  }
+  // cuando cambian filtros/página, el hook ya refetchea; aquí solo reseteo a página 1 al buscar
+  const onSearchChange = (v: string) => {
+    setQ(v);
+    setPage(1);
+  };
 
-  const toggleEmployeeStatus = (employee: Employee) => {
-    const newStatus = employee.status === EmployeeStatus.ACTIVE 
-      ? EmployeeStatus.INACTIVE 
-      : EmployeeStatus.ACTIVE
+  // rows para la tabla (y filtro client-side por estado si el backend aún no lo filtra)
+  const rows: Row[] = React.useMemo(() => {
+    const items = (data?.items ?? []) as Row[];
+    if (estado === "todos") return items;
+    return items.filter((r) => r.estado === estado);
+  }, [data?.items, estado]);
 
-    setEmployees(employees.map(emp => 
-      emp.id === employee.id 
-        ? { ...emp, status: newStatus }
-        : emp
-    ))
-
-    toast.success(`Empleado ${newStatus === EmployeeStatus.ACTIVE ? 'activado' : 'desactivado'}`)
-  }
-
-  const getPosition = (positionId: string) => {
-    return mockPositions.find(p => p.id === positionId)
-  }
-
-  const getEmployeeInitials = (employee: Employee) => {
-    return `${employee.firstName.charAt(0)}${employee.lastName.charAt(0)}`
-  }
-
-  const getYearsOfService = (hireDate: string) => {
-    const hire = new Date(hireDate)
-    const today = new Date()
-    return Math.floor((today.getTime() - hire.getTime()) / (1000 * 60 * 60 * 24 * 365))
-  }
-
-  // Filter employees
-  const filteredEmployees = employees.filter(employee => {
-    const position = getPosition(employee.positionId)
-    return (
-      (departmentFilter === 'all' || position?.department === departmentFilter) &&
-      (statusFilter === 'all' || employee.status === statusFilter)
-    )
-  })
-
-  const columns: ColumnDef<Employee>[] = [
-    {
-      accessorKey: 'employee',
-      header: 'Empleado',
-      cell: ({ row }) => {
-        const employee = row.original
-        return (
-          <div className="flex items-center space-x-3">
-            <Avatar>
-              <AvatarFallback>
-                {getEmployeeInitials(employee)}
-              </AvatarFallback>
-            </Avatar>
-            <div>
-              <div className="font-medium">
-                {employee.firstName} {employee.lastName}
-              </div>
-              <div className="text-sm text-muted-foreground">
-                DNI: {employee.documentId}
+  // columnas (dinámicas según `visible`)
+  const columns = React.useMemo<ColumnDef<Row>[]>(() => {
+    const cols: ColumnDef<Row>[] = [
+      {
+        id: "empleado",
+        header: "Empleado",
+        cell: ({ row }) => {
+          const r = row.original;
+          return (
+            <div className="flex items-center gap-3">
+              <Avatar className="h-8 w-8">
+                <AvatarFallback>{initials(r.nombres, r.apellidos)}</AvatarFallback>
+              </Avatar>
+              <div>
+                <div className="font-medium">{r.nombres} {r.apellidos}</div>
+                <div className="text-xs text-muted-foreground">{r.email ?? "—"}</div>
               </div>
             </div>
-          </div>
-        )
-      }
-    },
-    {
-      accessorKey: 'positionId',
-      header: 'Puesto',
-      cell: ({ row }) => {
-        const position = getPosition(row.original.positionId)
-        return (
-          <div>
-            <div className="font-medium">{position?.name}</div>
-            <div className="text-sm text-muted-foreground">{position?.department}</div>
-          </div>
-        )
-      }
-    },
-    {
-      accessorKey: 'hireDate',
-      header: 'Fecha Ingreso',
-      cell: ({ row }) => {
-        const hireDate = row.original.hireDate
-        const years = getYearsOfService(hireDate)
-        return (
-          <div>
-            <div>{formatDate(hireDate)}</div>
-            <div className="text-sm text-muted-foreground">
-              {years} {years === 1 ? 'año' : 'años'}
-            </div>
-          </div>
-        )
-      }
-    },
-    {
-      accessorKey: 'baseSalary',
-      header: 'Salario Base',
-      cell: ({ row }) => (
-        <div className="font-medium">
-          {formatCurrency(row.original.baseSalary)}
-        </div>
-      )
-    },
-    {
-      accessorKey: 'email',
-      header: 'Contacto',
-      cell: ({ row }) => (
-        <div className="space-y-1">
-          <div className="flex items-center text-sm">
-            <Mail className="mr-1 h-3 w-3" />
-            {row.original.email}
-          </div>
-          <div className="flex items-center text-sm">
-            <Phone className="mr-1 h-3 w-3" />
-            {row.original.phone}
-          </div>
-        </div>
-      )
-    },
-    {
-      accessorKey: 'status',
-      header: 'Estado',
-      cell: ({ row }) => <StatusBadge status={row.original.status} />
-    },
-    {
-      id: 'actions',
-      cell: ({ row }) => {
-        const employee = row.original
-        return (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" className="h-8 w-8 p-0">
-                <span className="sr-only">Abrir menú</span>
-                <MoreHorizontal className="h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuLabel>Acciones</DropdownMenuLabel>
-              <DropdownMenuItem>
-                <User className="mr-2 h-4 w-4" />
-                Ver Perfil
-              </DropdownMenuItem>
-              <DropdownMenuItem>
-                <Calendar className="mr-2 h-4 w-4" />
-                Historial de Nómina
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => toggleEmployeeStatus(employee)}>
-                {employee.status === EmployeeStatus.ACTIVE ? 'Desactivar' : 'Activar'}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )
+          );
+        },
       },
-    },
-  ]
+    ];
 
-  // Calculate statistics
-  const totalEmployees = filteredEmployees.length
-  const activeEmployees = filteredEmployees.filter(e => e.status === EmployeeStatus.ACTIVE).length
-  const totalPayroll = filteredEmployees
-    .filter(e => e.status === EmployeeStatus.ACTIVE)
-    .reduce((sum, e) => sum + e.baseSalary, 0)
-  const avgSalary = activeEmployees > 0 ? totalPayroll / activeEmployees : 0
+    if (visible.doc_id) {
+      cols.push({ accessorKey: "doc_id", header: "Documento" });
+    }
+    if (visible.telefono) {
+      cols.push({
+        accessorKey: "telefono",
+        header: "Teléfono",
+        cell: ({ row }) => row.original.telefono ?? "—",
+      });
+    }
+    if (visible.position_id) {
+      cols.push({
+        accessorKey: "position_id",
+        header: "Puesto (ID)",
+        cell: ({ row }) => row.original.position_id ?? "—",
+      });
+    }
+    if (visible.base_salary) {
+      cols.push({
+        accessorKey: "base_salary",
+        header: "Salario",
+        cell: ({ row }) => row.original.base_salary == null ? "—" : formatCurrency(row.original.base_salary, "PEN"),
+      });
+    }
+    if (visible.fecha_ingreso) {
+      cols.push({
+        accessorKey: "fecha_ingreso",
+        header: "Fecha Ingreso",
+        cell: ({ row }) => formatDate(row.original.fecha_ingreso),
+      });
+    }
+    if (visible.estado) {
+      cols.push({
+        accessorKey: "estado",
+        header: "Estado",
+        cell: ({ row }) => (
+          <StatusBadge
+            status={row.original.estado === "activo" ? EmployeeStatus.ACTIVE : EmployeeStatus.INACTIVE}
+          />
+        ),
+      });
+    }
+    return cols;
+  }, [visible]);
 
-  // Chart data
-  const employeesByDepartment = Array.from(new Set(mockPositions.map(p => p.department))).map(dept => ({
-    name: dept,
-    count: filteredEmployees.filter(emp => {
-      const position = getPosition(emp.positionId)
-      return position?.department === dept
-    }).length
-  }))
+  // total páginas
+  const totalPages = Math.max(1, Math.ceil((data?.total || 0) / pageSize));
 
-  const salaryRanges = [
-    { range: '< S/ 2,000', count: filteredEmployees.filter(e => e.baseSalary < 2000).length },
-    { range: 'S/ 2,000 - S/ 4,000', count: filteredEmployees.filter(e => e.baseSalary >= 2000 && e.baseSalary < 4000).length },
-    { range: 'S/ 4,000 - S/ 6,000', count: filteredEmployees.filter(e => e.baseSalary >= 4000 && e.baseSalary < 6000).length },
-    { range: '> S/ 6,000', count: filteredEmployees.filter(e => e.baseSalary >= 6000).length }
-  ]
+  // toggle columnas
+  const toggle = (key: keyof typeof visible) =>
+    setVisible((v) => ({ ...v, [key]: !v[key] }));
+
+  // exportar TODOS los empleados en PDF (recorriendo páginas)
+  const exportPDF = async () => {
+    const all: Row[] = [];
+    try {
+      // trae todas las páginas (respetando el filtro q/estado)
+      const fetchPage = async (pg: number) => {
+        const qs = new URLSearchParams({
+          page: String(pg),
+          page_size: "100", // página grande para exportar
+          ...(q ? { q } : {}),
+          ...(estado !== "todos" ? { estado } : {}),
+        });
+        const res = await fetch(`${import.meta.env.VITE_API_BASE || "http://127.0.0.1:8080/api/v1"}/rrhh/empleados?${qs.toString()}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        all.push(...(json.items as Row[]));
+        const total = Number(json.total || 0);
+        const pages = Math.ceil(total / 100);
+        if (pg < pages) await fetchPage(pg + 1);
+      };
+      await fetchPage(1);
+
+      const doc = new jsPDF({ unit: "pt", format: "a4" });
+      doc.setFontSize(14);
+      doc.text("Empleados", 40, 40);
+
+      autoTable(doc, {
+        startY: 60,
+        head: [[
+          "Empleado",
+          ...(visible.doc_id ? ["Documento"] : []),
+          ...(visible.telefono ? ["Teléfono"] : []),
+          ...(visible.position_id ? ["Puesto (ID)"] : []),
+          ...(visible.base_salary ? ["Salario"] : []),
+          ...(visible.fecha_ingreso ? ["Fecha Ingreso"] : []),
+          ...(visible.estado ? ["Estado"] : []),
+        ]],
+        body: all.map((r) => ([
+          `${r.nombres} ${r.apellidos} ${r.email ? `\n${r.email}` : ""}`,
+          ...(visible.doc_id ? [r.doc_id ?? "—"] : []),
+          ...(visible.telefono ? [r.telefono ?? "—"] : []),
+          ...(visible.position_id ? [r.position_id ?? "—"] : []),
+          ...(visible.base_salary ? [r.base_salary == null ? "—" : formatCurrency(r.base_salary, "PEN")] : []),
+          ...(visible.fecha_ingreso ? [formatDate(r.fecha_ingreso)] : []),
+          ...(visible.estado ? [r.estado.toUpperCase()] : []),
+        ])),
+        styles: { fontSize: 9, cellPadding: 6, lineWidth: 0.2 },
+        headStyles: { fillColor: [34, 197, 94] }, // verde sutil
+        didDrawPage: (d) => {
+          const page = doc.getCurrentPageInfo().pageNumber;
+          doc.setFontSize(9);
+          doc.text(`Página ${page}`, d.settings.margin.left, doc.internal.pageSize.height - 10);
+        },
+      });
+
+      doc.save("empleados.pdf");
+    } catch (e) {
+      console.error(e);
+      alert("No se pudo exportar. Revisa la consola.");
+    }
+  };
+
+  const total = data?.total ?? 0;
+const activos = rows.filter(r => r.estado === "activo").length;
+const inactivos = rows.filter(r => r.estado === "inactivo").length;
+const paginaInfo = `${page} / ${totalPages}`;
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex justify-between items-center">
+    <div className="rrhh-empleados space-y-6">
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">Gestión de Empleados</h1>
+        <div className="flex items-center gap-2">
+          {/* Exportar */}
+          <Button variant="outline" onClick={exportPDF}>Exportar</Button>
+
+          {/* Columnas */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline">Columnas</Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48">
+              <DropdownMenuCheckboxItem checked={visible.doc_id} onCheckedChange={() => toggle("doc_id")}>
+                Documento
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuCheckboxItem checked={visible.telefono} onCheckedChange={() => toggle("telefono")}>
+                Teléfono
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuCheckboxItem checked={visible.position_id} onCheckedChange={() => toggle("position_id")}>
+                Puesto (ID)
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuCheckboxItem checked={visible.base_salary} onCheckedChange={() => toggle("base_salary")}>
+                Salario
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuCheckboxItem checked={visible.fecha_ingreso} onCheckedChange={() => toggle("fecha_ingreso")}>
+                Fecha Ingreso
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuCheckboxItem checked={visible.estado} onCheckedChange={() => toggle("estado")}>
+                Estado
+              </DropdownMenuCheckboxItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+
+      {/* Filtros */}
+      <div className="flex flex-wrap items-center gap-3">
+  {/* 🔹 envoltorio con flex-1 para que se estire */}
+  <div className="flex-1 min-w-[280px]">
+    <input
+      className="h-9 w-full rounded-md border bg-background px-3 text-sm outline-none
+                 ring-offset-background placeholder:text-muted-foreground
+                 focus-visible:ring-2 focus-visible:ring-ring"
+      placeholder="Buscar por nombre, apellido, email o doc…"
+      value={q}
+      onChange={(e) => onSearchChange(e.target.value)}
+    />
+  </div>
+
+  <select
+    className="h-9 rounded-md border bg-background px-2 text-sm"
+    value={estado}
+    onChange={(e) => { setEstado(e.target.value as any); setPage(1); }}
+  >
+    <option value="todos">Todos</option>
+    <option value="activo">Activos</option>
+    <option value="inactivo">Inactivos</option>
+  </select>
+
+  <Button variant="secondary" onClick={() => refetch()} disabled={loading}>
+    Refrescar
+  </Button>
+
+  {/* Paginación arriba (queda a la derecha) */}
+  <div className="ml-auto flex items-center gap-2 text-sm">
+    <Button variant="outline" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading}>
+      Anterior
+    </Button>
+    <span className="text-muted-foreground">Página {page} / {totalPages}</span>
+    <Button variant="outline" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading}>
+      Siguiente
+    </Button>
+  </div>
+</div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Empleados</CardTitle>
+        </CardHeader>
+
+        {/* KPIs rápidos */}
+<div className="mx-auto max-w-6xl">
+  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+    {/* Total registros */}
+    <div className="rounded-2xl border bg-gradient-to-br from-sky-50 to-sky-100/40 p-4 dark:from-sky-950/50 dark:to-sky-900/20">
+      <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">Gestión de Empleados</h1>
-          <p className="text-muted-foreground">
-            Administra el personal y su información laboral
-          </p>
+          <div className="text-xs text-muted-foreground">Total registros</div>
+          <div className="mt-1 text-2xl font-semibold">{total}</div>
         </div>
-        
-        <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
-          <DialogTrigger asChild>
-            <Button>
-              <Plus className="mr-2 h-4 w-4" />
-              Nuevo Empleado
-            </Button>
-          </DialogTrigger>
-          <DialogContent className="sm:max-w-[500px]">
-            <Form {...form}>
-              <form onSubmit={form.handleSubmit(handleCreateEmployee)}>
-                <DialogHeader>
-                  <DialogTitle>Nuevo Empleado</DialogTitle>
-                  <DialogDescription>
-                    Registra un nuevo empleado en el sistema.
-                  </DialogDescription>
-                </DialogHeader>
-                
-                <div className="grid gap-4 py-4">
-                  <div className="grid grid-cols-2 gap-4">
-                    <FormField
-                      control={form.control}
-                      name="firstName"
-                      render={({ field }) => (
-                        <FormItem>
-                          <FormLabel>Nombres</FormLabel>
-                          <FormControl>
-                            <Input {...field} />
-                          </FormControl>
-                          <FormMessage />
-                        </FormItem>
-                      )}
-                    />
-                    
-                    <FormField
-                      control={form.control}
-                      name="lastName"
-                      render={({ field }) => (
-                        <FormItem>
-                          <FormLabel>Apellidos</FormLabel>
-                          <FormControl>
-                            <Input {...field} />
-                          </FormControl>
-                          <FormMessage />
-                        </FormItem>
-                      )}
-                    />
-                  </div>
-                  
-                  <FormField
-                    control={form.control}
-                    name="documentId"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Documento de Identidad</FormLabel>
-                        <FormControl>
-                          <Input {...field} placeholder="DNI o CE" />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                  
-                  <FormField
-                    control={form.control}
-                    name="positionId"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Puesto</FormLabel>
-                        <Select onValueChange={field.onChange} defaultValue={field.value}>
-                          <FormControl>
-                            <SelectTrigger>
-                              <SelectValue placeholder="Selecciona un puesto" />
-                            </SelectTrigger>
-                          </FormControl>
-                          <SelectContent>
-                            {mockPositions.map((position) => (
-                              <SelectItem key={position.id} value={position.id}>
-                                {position.name} - {position.department}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                  
-                  <div className="grid grid-cols-2 gap-4">
-                    <FormField
-                      control={form.control}
-                      name="hireDate"
-                      render={({ field }) => (
-                        <FormItem>
-                          <FormLabel>Fecha Ingreso</FormLabel>
-                          <FormControl>
-                            <Input type="date" {...field} />
-                          </FormControl>
-                          <FormMessage />
-                        </FormItem>
-                      )}
-                    />
-                    
-                    <FormField
-                      control={form.control}
-                      name="baseSalary"
-                      render={({ field }) => (
-                        <FormItem>
-                          <FormLabel>Salario Base</FormLabel>
-                          <FormControl>
-                            <Input 
-                              type="number" 
-                              step="0.01"
-                              {...field} 
-                              onChange={e => field.onChange(Number(e.target.value))}
-                            />
-                          </FormControl>
-                          <FormMessage />
-                        </FormItem>
-                      )}
-                    />
-                  </div>
-                  
-                  <FormField
-                    control={form.control}
-                    name="email"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Email</FormLabel>
-                        <FormControl>
-                          <Input type="email" {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                  
-                  <FormField
-                    control={form.control}
-                    name="phone"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Teléfono</FormLabel>
-                        <FormControl>
-                          <Input {...field} />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                </div>
-                
-                <DialogFooter>
-                  <Button type="submit">Registrar Empleado</Button>
-                </DialogFooter>
-              </form>
-            </Form>
-          </DialogContent>
-        </Dialog>
-      </div>
-
-      {/* Filters */}
-      <div className="flex items-center space-x-4 p-4 bg-muted/50 rounded-lg">
-        <div className="flex items-center space-x-2">
-          <label className="text-sm font-medium">Departamento:</label>
-          <Select value={departmentFilter} onValueChange={setDepartmentFilter}>
-            <SelectTrigger className="w-40">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">Todos</SelectItem>
-              {Array.from(new Set(mockPositions.map(p => p.department))).map(dept => (
-                <SelectItem key={dept} value={dept}>
-                  {dept}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        <div className="flex items-center space-x-2">
-          <label className="text-sm font-medium">Estado:</label>
-          <Select value={statusFilter} onValueChange={setStatusFilter}>
-            <SelectTrigger className="w-32">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">Todos</SelectItem>
-              <SelectItem value={EmployeeStatus.ACTIVE}>Activos</SelectItem>
-              <SelectItem value={EmployeeStatus.INACTIVE}>Inactivos</SelectItem>
-            </SelectContent>
-          </Select>
+        <div className="rounded-full bg-sky-100 p-2 dark:bg-sky-900/50">
+          <Users className="h-5 w-5 text-sky-600 dark:text-sky-300" />
         </div>
       </div>
-
-      {/* Stats Cards */}
-      <div className="grid gap-4 md:grid-cols-4">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Total Empleados</CardTitle>
-            <User className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{totalEmployees}</div>
-            <p className="text-xs text-muted-foreground">
-              {activeEmployees} activos
-            </p>
-          </CardContent>
-        </Card>
-        
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Nómina Total</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {formatCurrency(totalPayroll)}
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Salarios base mensuales
-            </p>
-          </CardContent>
-        </Card>
-        
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Salario Promedio</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {formatCurrency(avgSalary)}
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Por empleado activo
-            </p>
-          </CardContent>
-        </Card>
-        
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Departamentos</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {employeesByDepartment.filter(d => d.count > 0).length}
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Con personal activo
-            </p>
-          </CardContent>
-        </Card>
-      </div>
-
-      <Tabs defaultValue="employees" className="space-y-4">
-        <TabsList>
-          <TabsTrigger value="employees">Empleados</TabsTrigger>
-          <TabsTrigger value="analytics">Análisis</TabsTrigger>
-        </TabsList>
-        
-        <TabsContent value="employees" className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Personal de la Empresa</CardTitle>
-              <CardDescription>
-                Información completa de todos los empleados
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <DataTable
-                columns={columns}
-                data={filteredEmployees}
-                searchKey="firstName"
-                searchPlaceholder="Buscar empleados..."
-                enableSelection={true}
-              />
-            </CardContent>
-          </Card>
-        </TabsContent>
-        
-        <TabsContent value="analytics" className="space-y-4">
-          <div className="grid gap-6 md:grid-cols-2">
-            <Card>
-              <CardHeader>
-                <CardTitle>Empleados por Departamento</CardTitle>
-                <CardDescription>Distribución del personal</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <ResponsiveContainer width="100%" height={300}>
-                  <BarChart data={employeesByDepartment}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="name" />
-                    <YAxis />
-                    <Tooltip />
-                    <Bar dataKey="count" fill="#8884d8" />
-                  </BarChart>
-                </ResponsiveContainer>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle>Distribución Salarial</CardTitle>
-                <CardDescription>Rangos de salarios base</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <ResponsiveContainer width="100%" height={300}>
-                  <PieChart>
-                    <Pie
-                      data={salaryRanges}
-                      cx="50%"
-                      cy="50%"
-                      labelLine={false}
-                      label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                      outerRadius={80}
-                      fill="#8884d8"
-                      dataKey="count"
-                    >
-                      {salaryRanges.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <Tooltip />
-                  </PieChart>
-                </ResponsiveContainer>
-              </CardContent>
-            </Card>
-          </div>
-        </TabsContent>
-      </Tabs>
     </div>
-  )
+
+    {/* Activos (página) */}
+    <div className="rounded-2xl border bg-gradient-to-br from-emerald-50 to-emerald-100/40 p-4 dark:from-emerald-950/50 dark:to-emerald-900/20">
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="text-xs text-muted-foreground">En esta página (activos)</div>
+          <div className="mt-1 text-2xl font-semibold">{activos}</div>
+        </div>
+        <div className="rounded-full bg-emerald-100 p-2 dark:bg-emerald-900/50">
+          <CheckCircle2 className="h-5 w-5 text-emerald-600 dark:text-emerald-300" />
+        </div>
+      </div>
+    </div>
+
+    {/* Inactivos (página) */}
+    <div className="rounded-2xl border bg-gradient-to-br from-amber-50 to-amber-100/40 p-4 dark:from-amber-950/50 dark:to-amber-900/20">
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="text-xs text-muted-foreground">En esta página (inactivos)</div>
+          <div className="mt-1 text-2xl font-semibold">{inactivos}</div>
+        </div>
+        <div className="rounded-full bg-amber-100 p-2 dark:bg-amber-900/50">
+          <XCircle className="h-5 w-5 text-amber-600 dark:text-amber-300" />
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+        <CardContent>
+          {error && (
+            <p className="text-sm text-destructive">
+              {typeof error === "string" ? error : (error as Error)?.message ?? "Error"}
+            </p>
+          )}
+          {loading ? (
+            <p className="text-sm text-muted-foreground">Cargando…</p>
+          ) : (
+            <DataTable
+            className="[&_.dt-toolbar]:hidden [&_.dt-pagination]:hidden"
+              columns={columns}
+              data={rows}
+              enableSelection={false}
+            />
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
 }
+
+
+
+
