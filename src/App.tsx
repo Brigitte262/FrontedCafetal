@@ -10,6 +10,7 @@ import { GestionInventario } from './app/logistica/inventario'
 import { KardexMovimientos } from './app/logistica/kardex'
 import { GestionFacturas } from './app/finanzas/facturas'
 import  GestionEmpleados  from './app/rrhh/empleados'
+import NominaPage from './app/rrhh/Nomina'
 
 // Simple router state management
 type Route = 
@@ -116,6 +117,14 @@ const routes = {
       { label: 'Empleados' }
     ],
     title: 'Gestión de Empleados'
+  },
+  '/app/rrhh/nomina': {
+    component: NominaPage,
+    breadcrumbs: [
+      { label: 'Recursos Humanos', href: '/app/rrhh' },
+      { label: 'Nómina' }
+    ],
+    title: 'Nómina'
   }
 }
 

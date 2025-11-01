@@ -1,20 +1,19 @@
 import * as React from "react";
 import type { ColumnDef } from "@tanstack/react-table";
 import jsPDF from "jspdf";
-import { DataTable } from "@/components/data-table";
-import { Users, CheckCircle2, XCircle, LayoutGrid } from "lucide-react";
-
-
 import autoTable from "jspdf-autotable";
+import { DataTable } from "@/components/data-table";
+import { Users, CheckCircle2, XCircle, Search } from "lucide-react";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import {
+  DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { StatusBadge } from "@/components/status-badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { EmployeeStatus } from "@/lib/types";
-
 import { useEmployees } from "@/hooks/useCafetalApi";
 
 type Row = {
@@ -30,6 +29,18 @@ type Row = {
   estado: "activo" | "inactivo";
 };
 
+const PAGE_SIZE = 10;
+
+// ---- pequeño hook de debounce ----
+function useDebounced<T>(value: T, delay = 350) {
+  const [v, setV] = React.useState(value);
+  React.useEffect(() => {
+    const t = setTimeout(() => setV(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return v;
+}
+
 function initials(first?: string, last?: string) {
   const a = (first?.[0] ?? "").toUpperCase();
   const b = (last?.[0] ?? "").toUpperCase();
@@ -41,7 +52,9 @@ export default function GestionEmpleados() {
   const [q, setQ] = React.useState("");
   const [estado, setEstado] = React.useState<"todos" | "activo" | "inactivo">("todos");
   const [page, setPage] = React.useState(1);
-  const pageSize = 10;
+
+  // debounce al query
+  const qDebounced = useDebounced(q, 350);
 
   // columnas visibles (client-side)
   const [visible, setVisible] = React.useState({
@@ -53,24 +66,20 @@ export default function GestionEmpleados() {
     estado: true,
   });
 
-  // fetch
+  // fetch (confía en el backend para estado; si es "todos", no manda el parámetro)
   const { data, loading, error, refetch } = useEmployees({
-    q,
+    q: qDebounced,
     page,
-    page_size: pageSize,
-    estado: estado === "todos" ? undefined : estado, // si tu API acepta ?estado=
+    page_size: PAGE_SIZE,
+    estado: estado === "todos" ? undefined : estado,
   });
 
-  // cuando cambian filtros/página, el hook ya refetchea; aquí solo reseteo a página 1 al buscar
-  const onSearchChange = (v: string) => {
-    setQ(v);
-    setPage(1);
-  };
-
-  // rows para la tabla (y filtro client-side por estado si el backend aún no lo filtra)
+  // filas: usa tal cual lo que venga; si por algo tu backend aún NO filtra por estado,
+  // se deja el fallback client-side:
   const rows: Row[] = React.useMemo(() => {
     const items = (data?.items ?? []) as Row[];
     if (estado === "todos") return items;
+    // fallback si no filtró el backend
     return items.filter((r) => r.estado === estado);
   }, [data?.items, estado]);
 
@@ -118,7 +127,8 @@ export default function GestionEmpleados() {
       cols.push({
         accessorKey: "base_salary",
         header: "Salario",
-        cell: ({ row }) => row.original.base_salary == null ? "—" : formatCurrency(row.original.base_salary, "PEN"),
+        cell: ({ row }) =>
+          row.original.base_salary == null ? "—" : formatCurrency(row.original.base_salary, "PEN"),
       });
     }
     if (visible.fecha_ingreso) {
@@ -142,89 +152,166 @@ export default function GestionEmpleados() {
     return cols;
   }, [visible]);
 
-  // total páginas
-  const totalPages = Math.max(1, Math.ceil((data?.total || 0) / pageSize));
+  const total = data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
-  // toggle columnas
   const toggle = (key: keyof typeof visible) =>
     setVisible((v) => ({ ...v, [key]: !v[key] }));
 
-  // exportar TODOS los empleados en PDF (recorriendo páginas)
-  const exportPDF = async () => {
-    const all: Row[] = [];
-    try {
-      // trae todas las páginas (respetando el filtro q/estado)
-      const fetchPage = async (pg: number) => {
-        const qs = new URLSearchParams({
-          page: String(pg),
-          page_size: "100", // página grande para exportar
-          ...(q ? { q } : {}),
-          ...(estado !== "todos" ? { estado } : {}),
-        });
-        const res = await fetch(`${import.meta.env.VITE_API_BASE || "http://127.0.0.1:8080/api/v1"}/rrhh/empleados?${qs.toString()}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const json = await res.json();
-        all.push(...(json.items as Row[]));
-        const total = Number(json.total || 0);
-        const pages = Math.ceil(total / 100);
-        if (pg < pages) await fetchPage(pg + 1);
-      };
-      await fetchPage(1);
+  // exportar TODOS los empleados en PDF (paginado)
+ const exportPDF = async () => {
+  const all: Row[] = [];
 
-      const doc = new jsPDF({ unit: "pt", format: "a4" });
-      doc.setFontSize(14);
-      doc.text("Empleados", 40, 40);
-
-      autoTable(doc, {
-        startY: 60,
-        head: [[
-          "Empleado",
-          ...(visible.doc_id ? ["Documento"] : []),
-          ...(visible.telefono ? ["Teléfono"] : []),
-          ...(visible.position_id ? ["Puesto (ID)"] : []),
-          ...(visible.base_salary ? ["Salario"] : []),
-          ...(visible.fecha_ingreso ? ["Fecha Ingreso"] : []),
-          ...(visible.estado ? ["Estado"] : []),
-        ]],
-        body: all.map((r) => ([
-          `${r.nombres} ${r.apellidos} ${r.email ? `\n${r.email}` : ""}`,
-          ...(visible.doc_id ? [r.doc_id ?? "—"] : []),
-          ...(visible.telefono ? [r.telefono ?? "—"] : []),
-          ...(visible.position_id ? [r.position_id ?? "—"] : []),
-          ...(visible.base_salary ? [r.base_salary == null ? "—" : formatCurrency(r.base_salary, "PEN")] : []),
-          ...(visible.fecha_ingreso ? [formatDate(r.fecha_ingreso)] : []),
-          ...(visible.estado ? [r.estado.toUpperCase()] : []),
-        ])),
-        styles: { fontSize: 9, cellPadding: 6, lineWidth: 0.2 },
-        headStyles: { fillColor: [34, 197, 94] }, // verde sutil
-        didDrawPage: (d) => {
-          const page = doc.getCurrentPageInfo().pageNumber;
-          doc.setFontSize(9);
-          doc.text(`Página ${page}`, d.settings.margin.left, doc.internal.pageSize.height - 10);
-        },
-      });
-
-      doc.save("empleados.pdf");
-    } catch (e) {
-      console.error(e);
-      alert("No se pudo exportar. Revisa la consola.");
-    }
+  // Paleta local (no toca nada global)
+  const BRAND = {
+    primary: [122, 30, 58] as [number, number, number],  // vino #7A1E3A
+    accent:  [240, 228, 233] as [number, number, number],// #F0E4E9
+    text:    [40, 40, 40]   as [number, number, number],
+    zebra:   [252, 248, 249] as [number, number, number],
   };
 
-  const total = data?.total ?? 0;
-const activos = rows.filter(r => r.estado === "activo").length;
-const inactivos = rows.filter(r => r.estado === "inactivo").length;
-const paginaInfo = `${page} / ${totalPages}`;
+  // 👉 Acepta string | null | undefined
+  const cleanPhone = (t?: string | null): string =>
+    t ? String(t).replace(/\s*\n\s*/g, " ") : "—";
+
+  try {
+    const base = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8080/api/v1";
+
+    // Traer todas las páginas
+    const fetchPage = async (pg: number) => {
+      const qs = new URLSearchParams({
+        page: String(pg),
+        page_size: "100",
+        ...(qDebounced ? { q: qDebounced } : {}),
+        ...(estado !== "todos" ? { estado } : {}),
+      });
+      const res = await fetch(`${base}/rrhh/empleados?${qs.toString()}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      all.push(...(json.items as Row[]));
+      const pages = Math.ceil(Number(json.total || 0) / 100);
+      if (pg < pages) await fetchPage(pg + 1);
+    };
+    await fetchPage(1);
+
+    // helpers
+    const money = (v: any) =>
+      `S/ ${Number(v ?? 0).toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const fdate = (d?: string) => (d ? new Date(d).toLocaleDateString("es-PE") : "—");
+
+    // PDF
+    const doc = new jsPDF({ unit: "pt", format: "a4" });
+    const pageWidth = doc.internal.pageSize.getWidth();
+
+    // Encabezados según columnas visibles
+    const head = [[
+      "Empleado",
+      ...(visible.doc_id ? ["Documento"] : []),
+      ...(visible.telefono ? ["Teléfono"] : []),
+      ...(visible.position_id ? ["Puesto (ID)"] : []),
+      ...(visible.base_salary ? ["Salario"] : []),
+      ...(visible.fecha_ingreso ? ["Fecha Ingreso"] : []),
+      ...(visible.estado ? ["Estado"] : []),
+    ]];
+
+    // Filas
+    const body = all.map((r) => ([
+      `${r.nombres} ${r.apellidos}${r.email ? `\n${r.email}` : ""}`,
+      ...(visible.doc_id ? [r.doc_id ?? "—"] : []),
+      ...(visible.telefono ? [cleanPhone(r.telefono)] : []),   // ✅ sin error de tipos
+      ...(visible.position_id ? [r.position_id ?? "—"] : []),
+      ...(visible.base_salary ? [r.base_salary == null ? "—" : money(r.base_salary)] : []),
+      ...(visible.fecha_ingreso ? [fdate(r.fecha_ingreso)] : []),
+      ...(visible.estado ? [(r.estado ?? "ACTIVO").toUpperCase()] : []),
+    ]));
+
+    // Helper: índice de columna por etiqueta
+    const idx = (label: string) => head[0].indexOf(label);
+
+    // Columnas angostas con ancho fijo; “Empleado” toma el resto
+    const columnStyles: Record<number, any> = {};
+    if (idx("Documento") > -1)     columnStyles[idx("Documento")]     = { cellWidth: 80,  halign: "center" };
+    if (idx("Teléfono") > -1)      columnStyles[idx("Teléfono")]      = { cellWidth: 80, halign: "center", overflow: "linebreak" };
+    if (idx("Puesto (ID)") > -1)   columnStyles[idx("Puesto (ID)")]   = { cellWidth: 75,  halign: "center" };
+    if (idx("Salario") > -1)       columnStyles[idx("Salario")]       = { cellWidth: 90,  halign: "right"  };
+    if (idx("Fecha Ingreso") > -1) columnStyles[idx("Fecha Ingreso")] = { cellWidth: 80,  halign: "center" };
+    if (idx("Estado") > -1)        columnStyles[idx("Estado")]        = { cellWidth: 60,  halign: "center", fontStyle: "bold" };
+    columnStyles[0] = { overflow: "linebreak" }; // Empleado ocupa el resto
+
+    autoTable(doc, {
+      startY: 84,
+      head,
+      body,
+      styles: {
+        fontSize: 9,
+        // ❌ lineHeight no existe; usa padding y valign para aire
+        cellPadding: { top: 5, right: 6, bottom: 5, left: 6 },
+        textColor: BRAND.text as any,
+        lineColor: [230, 230, 230],
+        lineWidth: 0.4,
+        valign: "middle",
+      },
+      headStyles: {
+        fillColor: BRAND.primary as any,
+        textColor: 255,
+        fontStyle: "bold",
+        minCellHeight: 20,
+      },
+      alternateRowStyles: { fillColor: BRAND.zebra as any },
+      columnStyles,
+      margin: { left: 24, right: 24, top: 84, bottom: 28 },
+      tableWidth: pageWidth - 48, // respeta márgenes
+
+      didDrawPage: (data) => {
+        // Header vino
+        doc.setFillColor(...BRAND.primary);
+        doc.rect(0, 0, pageWidth, 46, "F");
+        doc.setTextColor(255, 255, 255);
+        doc.setFontSize(16);
+        doc.text("CAFETAL SAC", 24, 28);
+        doc.setFontSize(10);
+        doc.text("Empleados", pageWidth - 24, 28, { align: "right" });
+
+        // Subtítulo/acento
+        doc.setFillColor(...BRAND.accent);
+        doc.rect(0, 46, pageWidth, 18, "F");
+        doc.setTextColor(...BRAND.text);
+        doc.setFontSize(11);
+        doc.text("Listado de empleados", 24, 58);
+
+        // Footer / página
+        const pageNo = (doc as any).getCurrentPageInfo().pageNumber;
+        doc.setFontSize(9);
+        doc.setTextColor(140, 140, 140);
+        doc.text(`Página ${pageNo}`, data.settings.margin.left, doc.internal.pageSize.height - 10);
+      },
+
+      didParseCell: (ctx) => {
+        // Un poco más alto para “Empleado” (suele llevar email)
+        if (ctx.section === "body" && ctx.column.index === 0) {
+          ctx.cell.styles.minCellHeight = 22;
+        }
+      },
+    });
+
+    doc.save("empleados.pdf");
+  } catch (e) {
+    console.error(e);
+    alert("No se pudo exportar. Revisa la consola.");
+  }
+};
+
+
+
+  const activos = rows.filter((r) => r.estado === "activo").length;
+  const inactivos = rows.filter((r) => r.estado === "inactivo").length;
 
   return (
     <div className="rrhh-empleados space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Gestión de Empleados</h1>
+        <h1 className="text-2xl font-semibold">Directorio Operativo del Equipo Cafetal</h1>
         <div className="flex items-center gap-2">
-          {/* Exportar */}
           <Button variant="outline" onClick={exportPDF}>Exportar</Button>
-
-          {/* Columnas */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="outline">Columnas</Button>
@@ -255,93 +342,96 @@ const paginaInfo = `${page} / ${totalPages}`;
 
       {/* Filtros */}
       <div className="flex flex-wrap items-center gap-3">
-  {/* 🔹 envoltorio con flex-1 para que se estire */}
-  <div className="flex-1 min-w-[280px]">
-    <input
-      className="h-9 w-full rounded-md border bg-background px-3 text-sm outline-none
-                 ring-offset-background placeholder:text-muted-foreground
-                 focus-visible:ring-2 focus-visible:ring-ring"
-      placeholder="Buscar por nombre, apellido, email o doc…"
-      value={q}
-      onChange={(e) => onSearchChange(e.target.value)}
-    />
-  </div>
+        <div className="relative flex-1 min-w-[280px]">
+          <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
+          <input
+            className="h-9 w-full rounded-md border bg-background pl-8 pr-3 text-sm outline-none
+                       ring-offset-background placeholder:text-muted-foreground
+                       focus-visible:ring-2 focus-visible:ring-ring"
+            placeholder="Buscar por nombre, apellido, email o doc…"
+            value={q}
+            onChange={(e) => { setQ(e.target.value); setPage(1); }}
+          />
+        </div>
 
-  <select
-    className="h-9 rounded-md border bg-background px-2 text-sm"
-    value={estado}
-    onChange={(e) => { setEstado(e.target.value as any); setPage(1); }}
-  >
-    <option value="todos">Todos</option>
-    <option value="activo">Activos</option>
-    <option value="inactivo">Inactivos</option>
-  </select>
+        <select
+          className="h-9 rounded-md border bg-background px-2 text-sm"
+          value={estado}
+          onChange={(e) => { setEstado(e.target.value as any); setPage(1); }}
+        >
+          <option value="todos">Todos</option>
+          <option value="activo">Activos</option>
+          <option value="inactivo">Inactivos</option>
+        </select>
 
-  <Button variant="secondary" onClick={() => refetch()} disabled={loading}>
-    Refrescar
-  </Button>
+        <Button variant="secondary" onClick={() => refetch()} disabled={loading}>
+          Refrescar
+        </Button>
 
-  {/* Paginación arriba (queda a la derecha) */}
-  <div className="ml-auto flex items-center gap-2 text-sm">
-    <Button variant="outline" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading}>
-      Anterior
-    </Button>
-    <span className="text-muted-foreground">Página {page} / {totalPages}</span>
-    <Button variant="outline" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading}>
-      Siguiente
-    </Button>
-  </div>
-</div>
+        {/* Paginación arriba */}
+        <div className="ml-auto flex items-center gap-2 text-sm">
+          <Button variant="outline" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || loading}>
+            Anterior
+          </Button>
+          <span className="text-muted-foreground">Página {page} / {totalPages}</span>
+          <Button variant="outline" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || loading}>
+            Siguiente
+          </Button>
+        </div>
+      </div>
 
-      <Card>
+      <Card
+        className="
+          rounded-2xl bg-white dark:bg-neutral-900 ring-1 ring-black/5 dark:ring-white/10
+          shadow-[0_8px_24px_rgba(0,0,0,.08)]
+          hover:shadow-[0_20px_60px_rgba(0,0,0,.16)]
+          transition-shadow duration-300
+        "
+      >
         <CardHeader>
           <CardTitle>Empleados</CardTitle>
         </CardHeader>
 
         {/* KPIs rápidos */}
-<div className="mx-auto max-w-6xl">
-  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-    {/* Total registros */}
-    <div className="rounded-2xl border bg-gradient-to-br from-sky-50 to-sky-100/40 p-4 dark:from-sky-950/50 dark:to-sky-900/20">
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="text-xs text-muted-foreground">Total registros</div>
-          <div className="mt-1 text-2xl font-semibold">{total}</div>
-        </div>
-        <div className="rounded-full bg-sky-100 p-2 dark:bg-sky-900/50">
-          <Users className="h-5 w-5 text-sky-600 dark:text-sky-300" />
-        </div>
-      </div>
-    </div>
+        <div className="mx-auto max-w-6xl">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-2xl border bg-gradient-to-br from-sky-50 to-sky-100/40 p-4 dark:from-sky-950/50 dark:to-sky-900/20">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-xs text-muted-foreground">Total registros</div>
+                  <div className="mt-1 text-2xl font-semibold">{total}</div>
+                </div>
+                <div className="rounded-full bg-sky-100 p-2 dark:bg-sky-900/50">
+                  <Users className="h-5 w-5 text-sky-600 dark:text-sky-300" />
+                </div>
+              </div>
+            </div>
 
-    {/* Activos (página) */}
-    <div className="rounded-2xl border bg-gradient-to-br from-emerald-50 to-emerald-100/40 p-4 dark:from-emerald-950/50 dark:to-emerald-900/20">
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="text-xs text-muted-foreground">En esta página (activos)</div>
-          <div className="mt-1 text-2xl font-semibold">{activos}</div>
-        </div>
-        <div className="rounded-full bg-emerald-100 p-2 dark:bg-emerald-900/50">
-          <CheckCircle2 className="h-5 w-5 text-emerald-600 dark:text-emerald-300" />
-        </div>
-      </div>
-    </div>
+            <div className="rounded-2xl border bg-gradient-to-br from-emerald-50 to-emerald-100/40 p-4 dark:from-emerald-950/50 dark:to-emerald-900/20">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-xs text-muted-foreground">En esta página (activos)</div>
+                  <div className="mt-1 text-2xl font-semibold">{activos}</div>
+                </div>
+                <div className="rounded-full bg-emerald-100 p-2 dark:bg-emerald-900/50">
+                  <CheckCircle2 className="h-5 w-5 text-emerald-600 dark:text-emerald-300" />
+                </div>
+              </div>
+            </div>
 
-    {/* Inactivos (página) */}
-    <div className="rounded-2xl border bg-gradient-to-br from-amber-50 to-amber-100/40 p-4 dark:from-amber-950/50 dark:to-amber-900/20">
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="text-xs text-muted-foreground">En esta página (inactivos)</div>
-          <div className="mt-1 text-2xl font-semibold">{inactivos}</div>
+            <div className="rounded-2xl border bg-gradient-to-br from-amber-50 to-amber-100/40 p-4 dark:from-amber-950/50 dark:to-amber-900/20">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-xs text-muted-foreground">En esta página (inactivos)</div>
+                  <div className="mt-1 text-2xl font-semibold">{inactivos}</div>
+                </div>
+                <div className="rounded-full bg-amber-100 p-2 dark:bg-amber-900/50">
+                  <XCircle className="h-5 w-5 text-amber-600 dark:text-amber-300" />
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
-        <div className="rounded-full bg-amber-100 p-2 dark:bg-amber-900/50">
-          <XCircle className="h-5 w-5 text-amber-600 dark:text-amber-300" />
-        </div>
-      </div>
-    </div>
-
-  </div>
-</div>
 
         <CardContent>
           {error && (
@@ -349,21 +439,33 @@ const paginaInfo = `${page} / ${totalPages}`;
               {typeof error === "string" ? error : (error as Error)?.message ?? "Error"}
             </p>
           )}
+
           {loading ? (
             <p className="text-sm text-muted-foreground">Cargando…</p>
           ) : (
             <DataTable
-            className="[&_.dt-toolbar]:hidden [&_.dt-pagination]:hidden"
+              className="[&_.dt-toolbar]:hidden [&_.dt-pagination]:hidden"
               columns={columns}
               data={rows}
               enableSelection={false}
             />
           )}
+
+          {/* Footer de paginación con rango */}
+          <div className="mt-4 flex items-center justify-between text-sm text-muted-foreground">
+            <div>
+              {rows.length
+                ? `Mostrando ${(page - 1) * PAGE_SIZE + 1}–${(page - 1) * PAGE_SIZE + rows.length} de ${total.toLocaleString()}`
+                : "—"}
+            </div>
+            
+          </div>
         </CardContent>
       </Card>
     </div>
   );
 }
+
 
 
 
